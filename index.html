@@ -1230,6 +1230,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     await initSuperAdmin();
     await initDefaultCategories();
     if (currentUser) {
+        // نوێکردنەوەی رۆڵی بەکارهێنەر لە داتابەیس — ئەگەر رۆڵی گۆڕابێت ببینرێت
+        try {
+            const { data: freshUser } = await db.from('users').select('*').eq('id', currentUser.id).single();
+            if (freshUser) {
+                currentUser = freshUser;
+                localStorage.setItem('currentLibraryUser', JSON.stringify(freshUser));
+            }
+        } catch(e) { console.log('Could not refresh user role:', e); }
         showLibrary();
     }
     setupEventListeners();
@@ -1260,14 +1268,15 @@ async function initDefaultCategories() {
     }
 }
 
-function showLibrary() {
+async function showLibrary() {
     document.getElementById('authPage').classList.remove('active');
     document.getElementById('libraryPage').style.display = 'block';
     document.getElementById('mainContent').classList.add('active');
     document.getElementById('footer').classList.add('active');
+    // بار بکە بەشەکان پێشتر ئەوەی showUserInfo بکرێت
+    await loadCategories();
     showUserInfo();
     checkAdminStatus();
-    loadCategories();
     loadBooks();
     loadRequests();
 }
@@ -1555,11 +1564,22 @@ function showUserInfo() {
     }
     const canUpload = currentUser.is_admin || currentUser.is_leader || currentUser.is_super_admin;
     if (canUpload) {
-        document.getElementById('adminOnlyMessage').style.display = 'block';
+        document.getElementById('adminOnlyMessage').style.display = 'none';
         document.getElementById('uploadAllowed').style.display = 'block';
         document.getElementById('uploadDescription').textContent = '';
+        // نوێکردنەوەی بەشەکان بۆ فۆرمی بارکردن
+        const sel = document.getElementById('bookCategory');
+        if (sel && allCategories.length > 0) {
+            sel.innerHTML = '<option value="">بەشێک هەڵبژێرە</option>';
+            allCategories.forEach(cat => {
+                const opt = document.createElement('option');
+                opt.value = cat.id;
+                opt.textContent = cat.name;
+                sel.appendChild(opt);
+            });
+        }
     } else {
-        document.getElementById('adminOnlyMessage').style.display = 'none';
+        document.getElementById('adminOnlyMessage').style.display = 'block';
         document.getElementById('uploadAllowed').style.display = 'none';
         document.getElementById('uploadDescription').textContent = 'تەنها بەڕێوەبەر یان لیدەر دەتوانن کتێب باربکەن.';
     }
@@ -1608,9 +1628,11 @@ function showAdminTab(tabId) {
 function toggleTheme() {
     settings.darkMode = !settings.darkMode;
     localStorage.setItem('librarySettings', JSON.stringify(settings));
-    document.body.classList.toggle('dark-mode', settings.darkMode);
-    // Force background repaint
-    document.body.style.background = '';
+    if (settings.darkMode) {
+        document.body.classList.add('dark-mode');
+    } else {
+        document.body.classList.remove('dark-mode');
+    }
     const icon = settings.darkMode ? '<i class="fas fa-sun"></i>' : '<i class="fas fa-moon"></i>';
     document.getElementById('themeToggle').innerHTML = icon;
     document.getElementById('themeToggleMobile').innerHTML = icon;
@@ -2005,19 +2027,20 @@ async function loadRequests() {
     const container = document.getElementById('requestsContainer');
     const empty = document.getElementById('emptyRequests');
     container.innerHTML = '';
-    const toShow = (currentUser.is_admin || currentUser.is_leader || currentUser.is_super_admin) ? allRequests : allRequests.filter(r => r.status === 'pending');
+    // تەنها داواکاریە چاوەروانەکان نیشان بدە — پەسەندکراو و ڕەتکراوەکان نیشان نادرێن
+    const toShow = allRequests.filter(r => r.status === 'pending');
     if (toShow.length === 0) { empty.style.display = 'block'; container.style.display = 'none'; return; }
     empty.style.display = 'none';
     container.style.display = 'grid';
+    const catText = { novel: 'ڕۆمان', science: 'زانستی', history: 'مێژوویی', religion: 'ئایینی', education: 'پەروەردەیی', general: 'گشتی' };
     toShow.forEach(req => {
         const card = document.createElement('div');
         card.className = 'request-card';
         card.setAttribute('data-req-id', req.id);
-        const catText = { novel: 'ڕۆمان', science: 'زانستی', history: 'مێژوویی', religion: 'ئایینی', education: 'پەروەردەیی', general: 'گشتی' };
         card.innerHTML = `
             <div class="request-header">
                 <div class="request-title">${req.title}</div>
-                <span class="request-status status-${req.status}">${statusText[req.status] || req.status}</span>
+                <span class="request-status status-pending">چاوەروان</span>
             </div>
             <div class="request-meta">
                 <div class="request-meta-item"><i class="fas fa-user-pen"></i> <span>${req.author}</span></div>
@@ -2026,7 +2049,7 @@ async function loadRequests() {
                 <div class="request-meta-item"><i class="far fa-calendar"></i> <span>${new Date(req.request_date).toLocaleDateString('ku')}</span></div>
                 ${req.reason ? `<div class="request-meta-item"><i class="fas fa-comment"></i> <span>${req.reason}</span></div>` : ''}
             </div>
-            ${(currentUser.is_admin || currentUser.is_leader) && req.status === 'pending' ? `
+            ${(currentUser.is_admin || currentUser.is_leader || currentUser.is_super_admin) ? `
             <div class="request-actions">
                 <button class="request-action-btn approve" onclick="handleRequest('${req.id}', 'approved')"><i class="fas fa-check"></i> پەسەندکردن</button>
                 <button class="request-action-btn reject" onclick="handleRequest('${req.id}', 'rejected')"><i class="fas fa-times"></i> ڕەتکردنەوە</button>
@@ -2038,11 +2061,23 @@ async function loadRequests() {
 async function handleRequest(reqId, status) {
     const { error } = await db.from('requests').update({ status, approved_by: currentUser.name, approved_date: new Date().toISOString() }).eq('id', reqId);
     if (error) { showMessage('کێشە: ' + error.message, 'error'); return; }
-    // Remove card from UI immediately
+    // سڕینەوەی کارتەکە لە UI بەبێ دووبارە لوود کردن
     const card = document.querySelector(`[data-req-id="${reqId}"]`);
-    if (card) card.remove();
+    if (card) {
+        card.style.transition = 'opacity 0.3s ease, transform 0.3s ease';
+        card.style.opacity = '0';
+        card.style.transform = 'scale(0.9)';
+        setTimeout(() => {
+            card.remove();
+            // ئەگەر هیچ کارتێک نەمای، پەیامی بەتاڵی نیشان بدە
+            const container = document.getElementById('requestsContainer');
+            if (container && container.children.length === 0) {
+                document.getElementById('emptyRequests').style.display = 'block';
+                container.style.display = 'none';
+            }
+        }, 300);
+    }
     showMessage(status === 'approved' ? 'داواکراوەکە پەسەند کرا! ✅' : 'داواکراوەکە ڕەت کراەوە! ❌', 'success');
-    loadRequests();
     if (document.getElementById('adminPanel').style.display === 'flex') loadAdminData();
 }
 
@@ -2184,12 +2219,6 @@ async function changeUserRole(userId, role) {
     const updates = { is_admin: role === 'admin' || role === 'leader', is_leader: role === 'leader', is_super_admin: false };
     const { error } = await db.from('users').update(updates).eq('id', userId);
     if (error) { showMessage('کێشە: ' + error.message, 'error'); return; }
-    // If changing own role, update currentUser
-    if (currentUser && currentUser.id === userId) {
-        currentUser = { ...currentUser, ...updates };
-        localStorage.setItem('currentLibraryUser', JSON.stringify(currentUser));
-        updateNavbar();
-    }
     showMessage(`ڕۆڵ گۆڕدرا ✅`, 'success');
     loadAdminData();
 }
@@ -2541,26 +2570,31 @@ function initAdvSearch() {
         document.getElementById('advSearchToggle').innerHTML = advSearchActive
             ? '<i class="fas fa-times"></i> داخستن'
             : '<i class="fas fa-sliders-h"></i> گەڕانی پێشکەوتوو';
+        // بەشەکان نوێ بکەرەوە کاتێک پانێل کراوەیە
+        if (advSearchActive) populateAdvCategories();
     });
     document.getElementById('advSearchApply').addEventListener('click', applyAdvSearch);
     document.getElementById('advSearchReset').addEventListener('click', resetAdvSearch);
-    // Populate category dropdown
-    populateAdvCategories();
 }
 function populateAdvCategories() {
     const sel = document.getElementById('advCategory');
     if (!sel) return;
+    const currentVal = sel.value;
     sel.innerHTML = '<option value="">هەموو بەشەکان</option>';
     allCategories.forEach(c => { sel.innerHTML += `<option value="${c.id}">${c.name}</option>`; });
+    if (currentVal) sel.value = currentVal;
 }
 function applyAdvSearch() {
+    // پاکی search box
+    const searchInput = document.getElementById('searchBooks');
+    if (searchInput) searchInput.value = '';
     const catId = document.getElementById('advCategory').value;
     const rating = parseFloat(document.getElementById('advRating').value) || 0;
     const sort = document.getElementById('advSort').value;
     const author = document.getElementById('advAuthor').value.toLowerCase().trim();
     let filtered = [...allBooks];
     if (catId) filtered = filtered.filter(b => b.category_id === catId);
-    if (author) filtered = filtered.filter(b => b.author.toLowerCase().includes(author));
+    if (author) filtered = filtered.filter(b => (b.author || '').toLowerCase().includes(author));
     if (rating > 0) filtered = filtered.filter(b => b.rating_count > 0 && (b.rating / b.rating_count) >= rating);
     if (sort === 'newest') filtered.sort((a,b) => new Date(b.upload_date) - new Date(a.upload_date));
     else if (sort === 'oldest') filtered.sort((a,b) => new Date(a.upload_date) - new Date(b.upload_date));
@@ -2568,13 +2602,15 @@ function applyAdvSearch() {
     else if (sort === 'most_downloaded') filtered.sort((a,b) => (b.download_count||0) - (a.download_count||0));
     else if (sort === 'highest_rated') filtered.sort((a,b) => { const ra = a.rating_count ? a.rating/a.rating_count : 0; const rb = b.rating_count ? b.rating/b.rating_count : 0; return rb - ra; });
     renderBooks(filtered);
-    showMessage(`${filtered.length} کتێب دۆزرایەوە`, 'success');
+    showMessage(`${filtered.length} کتێب دۆزرایەوە`, filtered.length > 0 ? 'success' : 'warning');
 }
 function resetAdvSearch() {
     document.getElementById('advCategory').value = '';
     document.getElementById('advRating').value = '';
     document.getElementById('advSort').value = 'newest';
     document.getElementById('advAuthor').value = '';
+    const searchInput = document.getElementById('searchBooks');
+    if (searchInput) searchInput.value = '';
     renderBooks(allBooks);
     showMessage('فلتەرەکان ڕیستکرانەوە', 'success');
 }
